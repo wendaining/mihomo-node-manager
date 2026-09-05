@@ -18,6 +18,7 @@ coverage.html
 *.token
 .env
 .env.*
+!.env.example
 state.json
 
 # Editors and operating-system files

@@ -8,6 +8,9 @@ After=network-online.target mihomo.service
 Type=simple
 User=mihomo-node-manager
 Group=mihomo-node-manager
+# The default pingpong env_file = ".env" resolves against this directory, so
+# the CPA credentials live in /etc/mihomo-node-manager/.env.
+WorkingDirectory=/etc/mihomo-node-manager
 ExecStartPre=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml --check-config
 ExecStart=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml
 Restart=on-failure
