@@ -30,7 +30,7 @@ func (s *Store) Load() (Persisted, error) {
 	if err := dec.Decode(&out); err != nil {
 		return Persisted{}, fmt.Errorf("decode state: %w", err)
 	}
-	if out.Version != CurrentVersion {
+	if out.Version < 1 || out.Version > CurrentVersion {
 		return Persisted{}, fmt.Errorf("unsupported state version %d", out.Version)
 	}
 	if out.Nodes == nil {
