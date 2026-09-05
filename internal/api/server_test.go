@@ -19,8 +19,12 @@ type fakeService struct {
 	healthy   bool
 	switchErr error
 	autoErr   error
+	pingpongR manager.PingpongReport
+	pingpongE error
 	node      string
 	force     bool
+	pingpongN string
+	pingpongF bool
 }
 
 func (f *fakeService) Snapshot() manager.Snapshot { return f.snapshot }
@@ -31,6 +35,10 @@ func (f *fakeService) ManualSwitch(_ context.Context, node string, force bool) (
 }
 func (f *fakeService) ResumeAuto(context.Context) (manager.Snapshot, error) {
 	return f.snapshot, f.autoErr
+}
+func (f *fakeService) PingpongCheck(_ context.Context, node string, force bool) (manager.PingpongReport, error) {
+	f.pingpongN, f.pingpongF = node, force
+	return f.pingpongR, f.pingpongE
 }
 
 func testHandler(service *fakeService) http.Handler {
@@ -100,5 +108,47 @@ func TestMethodNotAllowed(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/v1/nodes", nil))
 	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("response = %d allow=%q", recorder.Code, recorder.Header().Get("Allow"))
+	}
+}
+
+func TestPingpongCheckEndpoint(t *testing.T) {
+	service := &fakeService{
+		snapshot: manager.Snapshot{Status: manager.Status{Status: "ok"}},
+		pingpongR: manager.PingpongReport{
+			Results: []manager.PingpongCheckResult{{Node: "A", Status: "pass", LatencyMS: 123, Detail: "pong: pong"}},
+		},
+	}
+	handler := testHandler(service)
+
+	// Empty body means "test the current node".
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/pingpong", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("empty body status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if service.pingpongN != "" || service.pingpongF {
+		t.Fatalf("node=%q force=%v, want defaults", service.pingpongN, service.pingpongF)
+	}
+	if !strings.Contains(recorder.Body.String(), `"status":"pass"`) {
+		t.Fatalf("report body = %s", recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/pingpong", strings.NewReader(`{"node":"B","force":true}`)))
+	if recorder.Code != http.StatusOK || service.pingpongN != "B" || !service.pingpongF {
+		t.Fatalf("force request = %d node=%q force=%v", recorder.Code, service.pingpongN, service.pingpongF)
+	}
+
+	service.pingpongE = &manager.OperationError{Code: "pingpong_disabled", Err: errors.New("not configured")}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/pingpong", nil))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("disabled status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/pingpong", nil))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d", recorder.Code)
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ type Service interface {
 	Healthy() bool
 	ManualSwitch(context.Context, string, bool) (manager.Snapshot, error)
 	ResumeAuto(context.Context) (manager.Snapshot, error)
+	PingpongCheck(context.Context, string, bool) (manager.PingpongReport, error)
 }
 
 type Server struct {
@@ -37,15 +39,18 @@ func New(listen string, service Service, logger *slog.Logger) *Server {
 	mux.HandleFunc("/v1/nodes", s.nodes)
 	mux.HandleFunc("/v1/switch", s.manualSwitch)
 	mux.HandleFunc("/v1/auto", s.resumeAuto)
+	mux.HandleFunc("/v1/pingpong", s.pingpongCheck)
 	s.http = &http.Server{
 		Addr:              listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      45 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    16 << 10,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		// A forced ping-pong sweep switches and tests every node and can
+		// legitimately run for a couple of minutes.
+		WriteTimeout:   180 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 16 << 10,
+		ErrorLog:       slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 	return s
 }
@@ -128,6 +133,27 @@ func (s *Server) resumeAuto(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snapshot.Status)
 }
 
+func (s *Server) pingpongCheck(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var request struct {
+		Node  string `json:"node"`
+		Force bool   `json:"force"`
+	}
+	// An empty body is allowed and means "test the current node".
+	if err := decodeOptionalJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	report, err := s.service.PingpongCheck(r.Context(), request.Node, request.Force)
+	if err != nil {
+		s.writeOperationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 func (s *Server) writeOperationError(w http.ResponseWriter, err error) {
 	var operationErr *manager.OperationError
 	if !errors.As(err, &operationErr) {
@@ -138,7 +164,7 @@ func (s *Server) writeOperationError(w http.ResponseWriter, err error) {
 	switch operationErr.Code {
 	case "node_not_allowed":
 		status = http.StatusBadRequest
-	case "node_not_present", "probe_failed", "dry_run":
+	case "node_not_present", "probe_failed", "dry_run", "pingpong_failed", "pingpong_disabled":
 		status = http.StatusConflict
 	case "mihomo_unavailable", "selection_failed", "cycle_failed":
 		status = http.StatusBadGateway
@@ -159,6 +185,32 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, out any) error {
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain one JSON object")
+		}
+		return err
+	}
+	return nil
+}
+
+// decodeOptionalJSON behaves like decodeRequest but accepts an empty body,
+// leaving out at its zero value.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, out any) error {
+	defer r.Body.Close()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		return err

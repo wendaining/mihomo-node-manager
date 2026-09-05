@@ -64,10 +64,11 @@ func run() error {
 	}
 	if *checkOnly {
 		return json.NewEncoder(os.Stdout).Encode(struct {
-			Status       string `json:"status"`
-			Config       string `json:"config"`
-			AllowedNodes int    `json:"allowed_nodes"`
-		}{Status: "ok", Config: *configPath, AllowedNodes: len(cfg.AllowedNodes)})
+			Status          string `json:"status"`
+			Config          string `json:"config"`
+			AllowedNodes    int    `json:"allowed_nodes"`
+			PingpongEnabled bool   `json:"pingpong_enabled"`
+		}{Status: "ok", Config: *configPath, AllowedNodes: len(cfg.AllowedNodes), PingpongEnabled: cfg.Pingpong.Active()})
 	}
 
 	logger := newLogger(cfg.Logging.Level)
@@ -85,7 +86,9 @@ func run() error {
 	store := state.NewStore(cfg.StateFile)
 	mgr := manager.New(cfg, client, store, logger, *dryRun)
 	if *once {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		// Generous budget: with the ping-pong probe enabled, one cycle may
+		// switch to and test several unproven candidates in turn.
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel()
 		cycleErr := mgr.RunCycle(ctx)
 		if err := json.NewEncoder(os.Stdout).Encode(mgr.Snapshot()); err != nil {
