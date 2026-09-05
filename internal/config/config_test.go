@@ -40,7 +40,7 @@ func TestPingpongEnvironmentLoading(t *testing.T) {
 	t.Run("env file enables the probe", func(t *testing.T) {
 		clearCPAEnv(t)
 		t.Chdir(t.TempDir())
-		if err := os.WriteFile(".env", []byte("CPA_BASE_URL=http://127.0.0.1:8317\nCPA_API_KEY=secret\nCPA_MODEL=gemini-3.8-flash-high\n"), 0o600); err != nil {
+		if err := os.WriteFile(".env", []byte("CPA_BASE_URL=http://127.0.0.1:8080\nCPA_API_KEY=secret\nCPA_MODEL=gemini-2.5-flash\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := Load(repoConfig)
@@ -50,7 +50,7 @@ func TestPingpongEnvironmentLoading(t *testing.T) {
 		if !cfg.Pingpong.Active() {
 			t.Fatal("pingpong should be active with CPA_BASE_URL and CPA_MODEL set")
 		}
-		if cfg.Pingpong.BaseURL != "http://127.0.0.1:8317" || cfg.Pingpong.Model != "gemini-3.8-flash-high" || cfg.Pingpong.APIKey != "secret" {
+		if cfg.Pingpong.BaseURL != "http://127.0.0.1:8080" || cfg.Pingpong.Model != "gemini-2.5-flash" || cfg.Pingpong.APIKey != "secret" {
 			t.Fatalf("resolved pingpong config = %+v", cfg.Pingpong)
 		}
 	})
@@ -73,7 +73,7 @@ func TestPingpongEnvironmentLoading(t *testing.T) {
 
 	t.Run("half configured is a hard error", func(t *testing.T) {
 		clearCPAEnv(t)
-		t.Setenv("CPA_BASE_URL", "http://127.0.0.1:8317")
+		t.Setenv("CPA_BASE_URL", "http://127.0.0.1:8080")
 		if _, err := Load(repoConfig); err == nil || !strings.Contains(err.Error(), "CPA_BASE_URL") {
 			t.Fatalf("Load() error = %v, want a CPA_BASE_URL/CPA_MODEL pairing error", err)
 		}
@@ -125,7 +125,7 @@ func TestPingpongValidation(t *testing.T) {
 		clearCPAEnv(t)
 		// The safe_node check only applies while the probe is active.
 		t.Chdir(t.TempDir())
-		if err := os.WriteFile(".env", []byte("CPA_BASE_URL=http://127.0.0.1:8317\nCPA_MODEL=m\n"), 0o600); err != nil {
+		if err := os.WriteFile(".env", []byte("CPA_BASE_URL=http://127.0.0.1:8080\nCPA_MODEL=m\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		text := strings.Replace(baseText, `safe_node = ""`, `safe_node = "Evil Node"`, 1)

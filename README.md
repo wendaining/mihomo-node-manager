@@ -6,7 +6,7 @@
 
 服务只会选择 `config.toml` 中的 `allowed_nodes`，不会修改 Mihomo 配置或订阅文件。
 
-后续 agent 维护前应先阅读 [`AGENTS.md`](AGENTS.md)，其中记录了安全不变量、服务器事实、真实 Mihomo provider API 差异和验证步骤。
+后续 agent 维护前应先阅读 [`AGENTS.md`](AGENTS.md)，其中记录了安全不变量、真实 Mihomo provider API 差异和验证步骤；具体服务器的部署事实记录在不入库的 `AGENTS.local.md` 中。
 
 ## 选择策略（含 ping-pong 时）
 
@@ -18,9 +18,9 @@
 
 补充规则：
 
-- 当前节点变脏时，优先测试并切换到 `pingpong.safe_node`（默认 `US-Reality-device-1`），失败再按延迟顺序扫描；手动指定的节点变脏同样会提前退出手动模式。
+- 当前节点变脏时，优先测试并切换到 `pingpong.safe_node`（需在 `allowed_nodes` 内，默认为空 = 不启用该偏好），失败再按延迟顺序扫描；手动指定的节点变脏同样会提前退出手动模式。
 - 脏节点标记保留 `fail_ttl_seconds`（默认 30 分钟），过期后重新视为"未测"，允许再次被测试（例如服务商更换了出口 IP）。
-- 只有 Google 的位置风控 400 才判脏；`503 auth_unavailable`（CPA 刷新 OAuth 凭证）、429、超时等一律视为**不确定**，不会导致切换。
+- 只有"脏判定规则"命中的响应才判脏（默认是 Google 的位置风控 400）；`503 auth_unavailable`（CPA 刷新 OAuth 凭证）、429、超时等一律视为**不确定**，不会导致切换。
 - ping-pong 需要验证"未测过"的节点时会短暂把策略组切到该节点发一次请求，测完立即落到最终选择；切换/测试后会关闭该策略组的既有连接，强制客户端从新节点重新拨号（`close_conns_on_switch`）。
 - 当前节点每隔 `refresh_interval_seconds`（默认 5 分钟）静默复测一次，无需切换组。
 
@@ -33,12 +33,12 @@ CPA 的地址、API Key 和模型名不写进 `config.toml`，而是从环境变
 ```sh
 cp .env.example .env
 # 编辑 .env，填写：
-#   CPA_BASE_URL  例如 http://127.0.0.1:8317 （写到 /v1 这一级即可，也接受完整 /v1/chat/completions）
+#   CPA_BASE_URL  例如 http://127.0.0.1:<端口> （写到 /v1 这一级即可，也接受完整 /v1/chat/completions）
 #   CPA_API_KEY   CPA 未开鉴权就留空
-#   CPA_MODEL     必须与 CPA 实际支持的一致（即日志里 providers=antigravity, model=... 的名字）
+#   CPA_MODEL     必须与你的 CPA 实际支持的模型名完全一致
 ```
 
-**服务器**（`tencent-lighthouse`）：
+**服务器**：
 
 ```sh
 sudo cp /etc/mihomo-node-manager/.env.example /etc/mihomo-node-manager/.env
@@ -73,14 +73,14 @@ curl -sS http://127.0.0.1:9123/v1/nodes
 
 curl -sS -X POST http://127.0.0.1:9123/v1/switch \
   -H 'Content-Type: application/json' \
-  -d '{"node":"🇺🇸 美国 02","force":false}'
+  -d '{"node":"node-02","force":false}'
 
 curl -sS -X POST http://127.0.0.1:9123/v1/auto
 
 # ping-pong 探测：空 body = 测当前出口节点
 curl -sS -X POST http://127.0.0.1:9123/v1/pingpong
 # 指定节点：会短暂切过去测一下再恢复
-curl -sS -X POST http://127.0.0.1:9123/v1/pingpong -d '{"node":"🇺🇸 美国 02"}'
+curl -sS -X POST http://127.0.0.1:9123/v1/pingpong -d '{"node":"node-02"}'
 # 全量扫描所有白名单节点，最后落在策略会选的节点上（可能需要一两分钟）
 curl -sS -X POST http://127.0.0.1:9123/v1/pingpong -d '{"force":true}'
 ```

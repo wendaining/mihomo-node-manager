@@ -13,7 +13,7 @@ import (
 )
 
 func TestClientProbeUnicodeAndSelect(t *testing.T) {
-	const node = "🇯🇵 日本 01"
+	const node = "node-01"
 	const group = "PROXY"
 	var mu sync.Mutex
 	selected := "old"
@@ -136,10 +136,10 @@ func TestCloseGroupConnectionsFiltersByChain(t *testing.T) {
 			defer mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"connections": []map[string]any{
-					{"id": "conn-1", "chains": []string{"🇯🇵 日本 01", "PROXY"}},
+					{"id": "conn-1", "chains": []string{"node-01", "PROXY"}},
 					{"id": "conn-2", "chains": []string{"DIRECT"}},
 					{"id": "conn-3", "chains": []string{"OTHER-GROUP"}},
-					{"id": "conn-4", "chains": []string{"US-Reality-device-1", "PROXY"}},
+					{"id": "conn-4", "chains": []string{"node-06", "PROXY"}},
 				},
 			})
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/connections/"):
@@ -169,7 +169,7 @@ func TestCloseGroupConnectionsFiltersByChain(t *testing.T) {
 }
 
 func TestPathEscapeRoundTrip(t *testing.T) {
-	name := "日本 / 01"
+	name := "EU / 01"
 	escaped := url.PathEscape(name)
 	if unescaped, err := url.PathUnescape(escaped); err != nil || unescaped != name {
 		t.Fatalf("path round trip = %q, %v", unescaped, err)

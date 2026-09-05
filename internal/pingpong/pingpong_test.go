@@ -12,9 +12,9 @@ import (
 
 func TestNormalizeEndpoint(t *testing.T) {
 	tests := []struct{ input, want string }{
-		{"http://127.0.0.1:8317", "http://127.0.0.1:8317/v1/chat/completions"},
-		{"http://127.0.0.1:8317/", "http://127.0.0.1:8317/v1/chat/completions"},
-		{"http://127.0.0.1:8317/v1", "http://127.0.0.1:8317/v1/chat/completions"},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080/v1/chat/completions"},
+		{"http://127.0.0.1:8080/", "http://127.0.0.1:8080/v1/chat/completions"},
+		{"http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1/chat/completions"},
 		{"https://cpa.example.com/v1/", "https://cpa.example.com/v1/chat/completions"},
 		{"https://cpa.example.com/v1/chat/completions", "https://cpa.example.com/v1/chat/completions"},
 		{"", ""},
@@ -66,7 +66,7 @@ func TestClassify(t *testing.T) {
 		{
 			name:       "cpa oauth refresh outage",
 			statusCode: 503,
-			body:       `{'error': {'message': 'auth_unavailable: no auth available (providers=antigravity, model=gemini-3.8-flash-high; last upstream error: Post "https://oauth2.googleapis.com/token": ...)', 'type': 'server_error', 'code': 'internal_server_error'}}`,
+			body:       `{'error': {'message': 'auth_unavailable: no auth available (providers=example, model=gemini-2.5-flash; last upstream error: Post "https://oauth2.googleapis.com/token": ...)', 'type': 'server_error', 'code': 'internal_server_error'}}`,
 			want:       StatusInconclusive,
 		},
 		{
@@ -151,7 +151,7 @@ func TestTesterSendsModelPromptAndKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tester := New(server.URL, "secret-key", "gemini-3.8-flash-high", "ping", 16, 5)
+	tester := New(server.URL, "secret-key", "gemini-2.5-flash", "ping", 16, 5)
 	result := tester.Test(context.Background())
 	if result.Status != StatusPass {
 		t.Fatalf("Test() = %+v, want pass", result)
@@ -165,7 +165,7 @@ func TestTesterSendsModelPromptAndKey(t *testing.T) {
 	if gotKey != "Bearer secret-key" {
 		t.Fatalf("authorization = %q", gotKey)
 	}
-	if gotModel != "gemini-3.8-flash-high" || gotPrompt != "ping" || gotStream {
+	if gotModel != "gemini-2.5-flash" || gotPrompt != "ping" || gotStream {
 		t.Fatalf("request = model %q prompt %q stream %v", gotModel, gotPrompt, gotStream)
 	}
 	if !strings.Contains(result.Detail, "pong") {

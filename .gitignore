@@ -21,6 +21,10 @@ coverage.html
 !.env.example
 state.json
 
+# Local-only deployment facts and agent workspace files
+AGENTS.local.md
+.zcode/
+
 # Editors and operating-system files
 .idea/
 .vscode/
