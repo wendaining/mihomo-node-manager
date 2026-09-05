@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -131,6 +132,41 @@ func (c *Client) Select(ctx context.Context, group, node string) (Group, error) 
 
 func (c *Client) ClearFixed(ctx context.Context, group string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/proxies/"+url.PathEscape(group), nil, nil, nil)
+}
+
+type Connection struct {
+	ID     string   `json:"id"`
+	Chains []string `json:"chains"`
+}
+
+// CloseGroupConnections closes every active Mihomo connection whose rule chain
+// traverses the given policy group. Mihomo keeps routing established
+// connections through their original node after a group switch, so dropping
+// them is what makes clients (the CPA included) re-dial through the newly
+// selected node - and what keeps per-node ping-pong results honest.
+func (c *Client) CloseGroupConnections(ctx context.Context, group string) (int, error) {
+	var response struct {
+		Connections []Connection `json:"connections"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/connections", nil, nil, &response); err != nil {
+		return 0, err
+	}
+	closed := 0
+	var firstErr error
+	for _, connection := range response.Connections {
+		if !slices.Contains(connection.Chains, group) {
+			continue
+		}
+		path := "/connections/" + url.PathEscape(connection.ID)
+		if err := c.doJSON(ctx, http.MethodDelete, path, nil, nil, nil); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("close connection: %w", err)
+			}
+			continue
+		}
+		closed++
+	}
+	return closed, firstErr
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {

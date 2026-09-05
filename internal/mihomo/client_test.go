@@ -126,6 +126,48 @@ func TestClientReportsHTTPAndVerificationErrors(t *testing.T) {
 	})
 }
 
+func TestCloseGroupConnectionsFiltersByChain(t *testing.T) {
+	var mu sync.Mutex
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+			mu.Lock()
+			defer mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"connections": []map[string]any{
+					{"id": "conn-1", "chains": []string{"🇯🇵 日本 01", "PROXY"}},
+					{"id": "conn-2", "chains": []string{"DIRECT"}},
+					{"id": "conn-3", "chains": []string{"OTHER-GROUP"}},
+					{"id": "conn-4", "chains": []string{"US-Reality-device-1", "PROXY"}},
+				},
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/connections/"):
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/connections/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", time.Second)
+	closed, err := client.CloseGroupConnections(context.Background(), "PROXY")
+	if err != nil {
+		t.Fatalf("CloseGroupConnections() error = %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 2 || deleted[0] != "conn-1" || deleted[1] != "conn-4" {
+		t.Fatalf("deleted = %v", deleted)
+	}
+}
+
 func TestPathEscapeRoundTrip(t *testing.T) {
 	name := "日本 / 01"
 	escaped := url.PathEscape(name)
