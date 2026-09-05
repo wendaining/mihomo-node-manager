@@ -18,8 +18,8 @@
 - Mihomo：Meta 1.19.30，服务名 `mihomo.service`，API 为 `http://127.0.0.1:9090`，策略组为 URLTest 类型的 `PROXY`。
 - Mihomo API 当前没有 secret；代码已支持从 `mihomo.secret_file` 读取 Bearer Token。
 - 管理 API：`127.0.0.1:9123`；状态：`/healthz`、`/v1/status`、`/v1/nodes`；操作：`POST /v1/switch`、`POST /v1/auto`、`POST /v1/pingpong`。
-- 系统安装路径：二进制 `/usr/local/bin/mihomo-node-manager`，配置 `/etc/mihomo-node-manager/config.toml`，状态 `/var/lib/mihomo-node-manager/state.json`，CPA 凭据 `/etc/mihomo-node-manager/.env`。
-- 0.1.0 曾于 2026-09-05 以部署包方式安装（包保留在远端 `/home/wendaining/mihomo-node-manager-deploy-0.1.0`）。0.2.0 已于同日晚间按新流程部署：服务器源码位于 `/home/wendaining/mihomo-node-manager-src`（克隆自 GitHub，Go 1.27.1 在 `/usr/local/go/bin`，构建用 `GOPROXY=https://goproxy.cn,direct`），`make build` 后执行 `sudo deploy/install.sh`（脚本支持仓库布局，不覆盖已有 config.toml 与 .env）。升级时需把 `config.toml.new` 的 `[pingpong]` 段合并进现有配置。
+- 系统安装路径：**二进制不落盘到系统目录**——systemd 直接执行 `/home/wendaining/mihomo-node-manager-src/outputs/mihomo-node-manager`（unit `ProtectHome=read-only` + `/home/wendaining` 已 `chmod o+x`，均为一次性设置）；配置 `/etc/mihomo-node-manager/config.toml`，状态 `/var/lib/mihomo-node-manager/state.json`，CPA 凭据 `/etc/mihomo-node-manager/.env`。`/usr/local/bin` 下的旧副本与 `/home/wendaining/mihomo-node-manager-deploy-0.1.0` 旧部署包已于 2026-09-05 删除，不要重建引用。
+- 0.1.0 部署包方式已废弃。当前部署事实：服务器源码位于 `/home/wendaining/mihomo-node-manager-src`（克隆自 GitHub，Go 1.27.1 在 `/usr/local/go/bin`，构建用 `GOPROXY=https://goproxy.cn,direct`）。升级流程：`git pull && make build && sudo systemctl restart mihomo-node-manager`；只有 unit/配置模板变化时才需要重跑 `sudo deploy/install.sh`（脚本只支持源码仓库布局，不覆盖已有 config.toml 与 .env）。
 - systemd unit 的 `WorkingDirectory=/etc/mihomo-node-manager`，因此配置默认值 `pingpong.env_file = ".env"` 解析为 `/etc/mihomo-node-manager/.env`；本地开发则解析为仓库根目录的 `.env`。进程环境变量优先于 `.env` 文件。
 - 状态文件为 `mihomo-node-manager:mihomo-node-manager` 所有、权限 `0600`，schema version 2（v1 文件可读，pingpong 字段从"未测"冷启动）；管理 API 与 Mihomo API 均仅监听 `127.0.0.1`。
 

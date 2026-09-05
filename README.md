@@ -94,12 +94,20 @@ curl -sS -X POST http://127.0.0.1:9123/v1/pingpong -d '{"force":true}'
 服务器上直接克隆源码构建（需要 Go ≥ 1.24）：
 
 ```sh
-git clone <本仓库> mihomo-node-manager && cd mihomo-node-manager
+git clone <本仓库> ~/mihomo-node-manager-src && cd ~/mihomo-node-manager-src
 make build
+chmod o+x ~                      # systemd unit 以专用用户运行，需要能穿越 home 目录（一次性）
 sudo ./deploy/install.sh
 ```
 
-安装脚本支持源码仓库布局（从 `outputs/`、`config/` 取文件），会安装二进制、unit 与 `.env.example` 到系统路径，但**从不覆盖**已有的 `config.toml` 和 `.env`（新配置写为 `config.toml.new`）。升级时注意把 `config.toml.new` 里的 `[pingpong]` 段合并进现有配置，然后按上一节创建 `/etc/mihomo-node-manager/.env` 并重启。
+systemd unit **直接执行 `~/mihomo-node-manager-src/outputs/` 下的二进制**，不会在 `/usr/local/bin` 安装副本（unit 里对应 `ProtectHome=read-only`）。因此之后的升级只需要：
+
+```sh
+cd ~/mihomo-node-manager-src && git pull && make build
+sudo systemctl restart mihomo-node-manager
+```
+
+安装脚本会安装 unit 与 `.env.example` 到系统路径，但**从不覆盖**已有的 `config.toml` 和 `.env`（新配置写为 `config.toml.new`）。首次部署时注意把 `config.toml.new` 里的 `[pingpong]` 段合并进现有配置，然后按上一节创建 `/etc/mihomo-node-manager/.env` 并重启。
 
 查看运行状态和日志：
 
@@ -115,7 +123,7 @@ curl -sS http://127.0.0.1:9123/v1/status
 
 ```sh
 sudo systemctl disable --now mihomo-node-manager
-sudo /usr/local/bin/mihomo-node-manager \
+sudo ~/mihomo-node-manager-src/outputs/mihomo-node-manager \
   --config /etc/mihomo-node-manager/config.toml \
   --clear-fixed
 ```

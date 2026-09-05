@@ -11,8 +11,12 @@ Group=mihomo-node-manager
 # The default pingpong env_file = ".env" resolves against this directory, so
 # the CPA credentials live in /etc/mihomo-node-manager/.env.
 WorkingDirectory=/etc/mihomo-node-manager
-ExecStartPre=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml --check-config
-ExecStart=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml
+# Run the binary straight from the source checkout's outputs/ directory: after
+# "git pull && make build" a plain restart picks the new build up. This pins the
+# checkout to /home/wendaining/mihomo-node-manager-src, requires the home
+# directory to be world-traversable (o+x) and ProtectHome=read-only below.
+ExecStartPre=/home/wendaining/mihomo-node-manager-src/outputs/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml --check-config
+ExecStart=/home/wendaining/mihomo-node-manager-src/outputs/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=15s
@@ -25,7 +29,9 @@ PrivateDevices=true
 PrivateTmp=true
 ProtectClock=true
 ProtectControlGroups=true
-ProtectHome=true
+# read-only (not "true") so the service user can exec the binary from the
+# source checkout under /home/wendaining.
+ProtectHome=read-only
 ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true

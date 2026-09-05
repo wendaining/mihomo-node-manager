@@ -8,25 +8,19 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-# Accept both the classic deployment-package layout (binary/config/unit next to
-# this script) and a plain source checkout (make build first, then run
-# sudo deploy/install.sh from the repository).
-if [ -f "$script_dir/mihomo-node-manager" ]; then
-  binary_source="$script_dir/mihomo-node-manager"
-else
-  binary_source="$script_dir/../outputs/mihomo-node-manager"
-fi
-if [ -f "$script_dir/config.toml" ]; then
-  config_source="$script_dir/config.toml"
-else
-  config_source="$script_dir/../config/config.toml"
-fi
+# Source-checkout layout only: systemd runs the binary straight from the
+# checkout's outputs/ directory (see the unit file), so no copy is installed
+# outside the repository and an upgrade is "git pull && make build && restart".
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+binary_source="$repo_dir/outputs/mihomo-node-manager"
+config_source="$repo_dir/config/config.toml"
 unit_source="$script_dir/mihomo-node-manager.service"
-env_example_source="$script_dir/../.env.example"
+env_example_source="$repo_dir/.env.example"
 
 for required in "$binary_source" "$config_source" "$unit_source"; do
   if [ ! -f "$required" ]; then
     echo "Missing deployment file: $required" >&2
+    echo "Build the binary first: make build" >&2
     exit 1
   fi
 done
@@ -38,7 +32,6 @@ if ! getent passwd mihomo-node-manager >/dev/null 2>&1; then
   useradd --system --gid mihomo-node-manager --home-dir /var/lib/mihomo-node-manager --no-create-home --shell /usr/sbin/nologin mihomo-node-manager
 fi
 
-install -m 0755 -o root -g root "$binary_source" /usr/local/bin/mihomo-node-manager
 install -d -m 0750 -o root -g mihomo-node-manager /etc/mihomo-node-manager
 install -d -m 0750 -o mihomo-node-manager -g mihomo-node-manager /var/lib/mihomo-node-manager
 
@@ -60,7 +53,11 @@ if [ ! -e /etc/mihomo-node-manager/.env ]; then
 fi
 
 install -m 0644 -o root -g root "$unit_source" /etc/systemd/system/mihomo-node-manager.service
-/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml --check-config
+
+# Validate from the unit's working directory so pingpong.env_file resolves
+# against the real /etc/mihomo-node-manager/.env as well.
+cd /etc/mihomo-node-manager
+"$binary_source" --config /etc/mihomo-node-manager/config.toml --check-config
 systemctl daemon-reload
 systemctl enable --now mihomo-node-manager.service
-systemctl --no-pager --full status mihomo-node-manager.service
+systemctl --no-pager --full status mihomo-node-manager.service | head -n 8
