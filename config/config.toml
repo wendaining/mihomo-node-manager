@@ -37,6 +37,40 @@ improvement_ms = 100
 better_rounds = 3
 manual_override_seconds = 1800
 
+[pingpong]
+# CPA (cli-proxy-api) Gemini ping-pong probe. The CPA's upstream Google traffic
+# egresses through Mihomo's currently selected node, so a real completion
+# request through the CPA tells us whether the exit node passes Google's
+# location risk control ("User location is not supported").
+#
+# The endpoint, API key and model are read from the environment, optionally
+# seeded by env_file (see .env.example at the repository root):
+#   CPA_BASE_URL, CPA_API_KEY, CPA_MODEL
+# When CPA_BASE_URL or CPA_MODEL is empty the probe stays disabled and the
+# service behaves exactly like before this section existed.
+#
+# env_file is resolved against the process working directory: the systemd unit
+# sets WorkingDirectory=/etc/mihomo-node-manager, so on the server this points
+# at /etc/mihomo-node-manager/.env while locally it is ./.env.
+env_file = ".env"
+enabled = true
+# The currently selected node is re-tested every refresh_interval_seconds
+# without switching the group.
+refresh_interval_seconds = 300
+# A node that returned the location ban is excluded from switching targets for
+# fail_ttl_seconds; after that it becomes "unknown" and may be re-tested.
+fail_ttl_seconds = 1800
+timeout_seconds = 20
+max_tokens = 16
+prompt = "ping"
+# When the current node turns dirty, this node is tested and preferred first
+# before scanning the rest by latency. Must be one of allowed_nodes.
+safe_node = "US-Reality-device-1"
+# Close the group's existing connections after a switch or test so clients
+# (the CPA included) re-dial through the new node immediately. This also keeps
+# ping-pong results from being polluted by connections pinned to old nodes.
+close_conns_on_switch = true
+
 [api]
 # The program rejects non-loopback listen addresses.
 listen = "127.0.0.1:9123"

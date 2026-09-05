@@ -5,19 +5,23 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/local/mihomo-node-manager/internal/dotenv"
 )
 
 type Config struct {
-	StateFile    string        `toml:"state_file"`
-	AllowedNodes []string      `toml:"allowed_nodes"`
-	Mihomo       MihomoConfig  `toml:"mihomo"`
-	Probe        ProbeConfig   `toml:"probe"`
-	Policy       PolicyConfig  `toml:"policy"`
-	API          APIConfig     `toml:"api"`
-	Logging      LoggingConfig `toml:"logging"`
+	StateFile    string         `toml:"state_file"`
+	AllowedNodes []string       `toml:"allowed_nodes"`
+	Mihomo       MihomoConfig   `toml:"mihomo"`
+	Probe        ProbeConfig    `toml:"probe"`
+	Policy       PolicyConfig   `toml:"policy"`
+	Pingpong     PingpongConfig `toml:"pingpong"`
+	API          APIConfig      `toml:"api"`
+	Logging      LoggingConfig  `toml:"logging"`
 }
 
 type MihomoConfig struct {
@@ -45,6 +49,33 @@ type PolicyConfig struct {
 	ImprovementMS         int     `toml:"improvement_ms"`
 	BetterRounds          int     `toml:"better_rounds"`
 	ManualOverrideSeconds int     `toml:"manual_override_seconds"`
+}
+
+// PingpongConfig drives the CPA Gemini ping-pong probe. The endpoint, API key
+// and model come from the environment (optionally seeded by env_file) so that
+// secrets stay out of config.toml.
+type PingpongConfig struct {
+	EnvFile                string `toml:"env_file"`
+	Enabled                bool   `toml:"enabled"`
+	RefreshIntervalSeconds int    `toml:"refresh_interval_seconds"`
+	FailTTLSeconds         int    `toml:"fail_ttl_seconds"`
+	TimeoutSeconds         int    `toml:"timeout_seconds"`
+	MaxTokens              int    `toml:"max_tokens"`
+	Prompt                 string `toml:"prompt"`
+	SafeNode               string `toml:"safe_node"`
+	CloseConnsOnSwitch     bool   `toml:"close_conns_on_switch"`
+
+	// Resolved from the CPA_* environment variables; never set from TOML.
+	BaseURL string `toml:"-"`
+	APIKey  string `toml:"-"`
+	Model   string `toml:"-"`
+}
+
+// Active reports whether the ping-pong probe should run. Both the CPA base URL
+// and the model are required; anything less disables the feature instead of
+// producing broken probes.
+func (p PingpongConfig) Active() bool {
+	return p.Enabled && p.BaseURL != "" && p.Model != ""
 }
 
 type APIConfig struct {
@@ -81,6 +112,21 @@ func Default() Config {
 			BetterRounds:          3,
 			ManualOverrideSeconds: 1800,
 		},
+		Pingpong: PingpongConfig{
+			// Relative paths resolve against the process working directory.
+			// The systemd unit sets WorkingDirectory=/etc/mihomo-node-manager,
+			// so the same default works locally (repo ./.env) and on the
+			// server (/etc/mihomo-node-manager/.env).
+			EnvFile:                ".env",
+			Enabled:                true,
+			RefreshIntervalSeconds: 300,
+			FailTTLSeconds:         1800,
+			TimeoutSeconds:         20,
+			MaxTokens:              16,
+			Prompt:                 "ping",
+			SafeNode:               "",
+			CloseConnsOnSwitch:     true,
+		},
 		API:     APIConfig{Listen: "127.0.0.1:9123"},
 		Logging: LoggingConfig{Level: "info"},
 	}
@@ -99,11 +145,30 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("unknown config keys: %s", strings.Join(parts, ", "))
 	}
+	if err := cfg.Pingpong.loadEnvironment(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	cfg.Mihomo.BaseURL = strings.TrimRight(cfg.Mihomo.BaseURL, "/")
 	return cfg, nil
+}
+
+// loadEnvironment seeds the process environment from pingpong.env_file and
+// then resolves the CPA_* variables. Variables that already exist in the
+// environment win over the file. A missing env_file is fine; a malformed one
+// is a hard error.
+func (p *PingpongConfig) loadEnvironment() error {
+	if p.EnvFile != "" {
+		if err := dotenv.Load(p.EnvFile); err != nil {
+			return fmt.Errorf("load pingpong env_file: %w", err)
+		}
+	}
+	p.BaseURL = strings.TrimSpace(os.Getenv("CPA_BASE_URL"))
+	p.APIKey = strings.TrimSpace(os.Getenv("CPA_API_KEY"))
+	p.Model = strings.TrimSpace(os.Getenv("CPA_MODEL"))
+	return nil
 }
 
 func (c Config) Validate() error {
@@ -157,6 +222,26 @@ func (c Config) Validate() error {
 	if c.Policy.ImprovementRatio < 0 || c.Policy.ImprovementRatio >= 1 {
 		errs = append(errs, errors.New("policy.improvement_ratio must be in [0, 1)"))
 	}
+	if c.Pingpong.Enabled && (c.Pingpong.BaseURL == "") != (c.Pingpong.Model == "") {
+		errs = append(errs, errors.New("pingpong requires both CPA_BASE_URL and CPA_MODEL (set them in the env_file or the process environment)"))
+	}
+	if c.Pingpong.BaseURL != "" {
+		parsed, err := url.Parse(c.Pingpong.BaseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			errs = append(errs, errors.New("CPA_BASE_URL must be an absolute http or https URL"))
+		}
+	}
+	if c.Pingpong.Active() {
+		if c.Pingpong.RefreshIntervalSeconds <= 0 || c.Pingpong.FailTTLSeconds <= 0 || c.Pingpong.TimeoutSeconds <= 0 || c.Pingpong.MaxTokens <= 0 {
+			errs = append(errs, errors.New("pingpong refresh_interval_seconds, fail_ttl_seconds, timeout_seconds and max_tokens must be positive"))
+		}
+		if strings.TrimSpace(c.Pingpong.Prompt) == "" {
+			errs = append(errs, errors.New("pingpong.prompt must not be empty"))
+		}
+		if c.Pingpong.SafeNode != "" && !containsNode(c.AllowedNodes, c.Pingpong.SafeNode) {
+			errs = append(errs, errors.New("pingpong.safe_node must be one of allowed_nodes"))
+		}
+	}
 	host, _, err := net.SplitHostPort(c.API.Listen)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("api.listen: %w", err))
@@ -172,4 +257,13 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("logging.level must be debug, info, warn or error"))
 	}
 	return errors.Join(errs...)
+}
+
+func containsNode(nodes []string, name string) bool {
+	for _, node := range nodes {
+		if node == name {
+			return true
+		}
+	}
+	return false
 }
