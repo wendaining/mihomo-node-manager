@@ -1,8 +1,16 @@
 # Mihomo Node Manager
 
+## 介绍
+
+**TLDR: 一个部署在服务器上的程序，通过 systemd 管理（有安装脚本）。定期测试本机的 Mihomo API 和 CPA 反代的 API 的通达度，通过适时选择最佳的节点避免 IP 的风控**。
+
+> [!note]
+>
+> 应用场景：服务器部署的 Astrbot 使用 CPA 反代的 API，但是经常出 400 错误，也就是 IP 被风控。通过部署此程序可适时调整。**通常需要至少一个节点是比较干净的**。
+
 一个独立的 Mihomo 白名单节点管理服务。它定期通过 Mihomo REST API 测量节点延迟，在节点故障时快速转移，并在候选节点持续明显更优时平稳切换。
 
-从 0.2.0 起，它还可以对 CPA（cli-proxy-api）反代的 Gemini API 做 **ping-pong 连通性探测**：Google 会按出口 IP 风控 Gemini API（`400 - User location is not supported`），延迟最低的节点未必能用。本服务会用一次极小的补全请求区分"能用"与"不能用"的节点，在保证可用的前提下选最快的。
+可以对 CPA（cli-proxy-api）反代的 Gemini API 做 **ping-pong 连通性探测**：Google 会按出口 IP 风控 Gemini API（`400 - User location is not supported`），延迟最低的节点未必能用。本服务会用一次极小的补全请求区分"能用"与"不能用"的节点，在保证可用的前提下选最快的。
 
 服务只会选择 `config.toml` 中的 `allowed_nodes`，不会修改 Mihomo 配置或订阅文件。
 
