@@ -11,6 +11,7 @@ import (
 
 	"github.com/local/mihomo-node-manager/internal/config"
 	"github.com/local/mihomo-node-manager/internal/mihomo"
+	"github.com/local/mihomo-node-manager/internal/pingpong"
 	"github.com/local/mihomo-node-manager/internal/state"
 )
 
@@ -19,6 +20,21 @@ type Controller interface {
 	Providers(context.Context) (map[string]string, error)
 	Probe(context.Context, string, string, string, string, time.Duration) (int, error)
 	Select(context.Context, string, string) (mihomo.Group, error)
+}
+
+// ConnectionCloser is an optional controller capability. Mihomo keeps routing
+// established connections through their original node after a group switch, so
+// dropping the group's connections is required both for fast failover and for
+// honest per-node ping-pong results.
+type ConnectionCloser interface {
+	CloseGroupConnections(ctx context.Context, group string) (int, error)
+}
+
+// PingPongTester performs one CPA Gemini completion through the node the
+// policy group currently resolves to. The manager switches the group before
+// calling it when the node under test differs from the active one.
+type PingPongTester interface {
+	Test(ctx context.Context) pingpong.Result
 }
 
 type StateStore interface {
@@ -44,6 +60,7 @@ type Status struct {
 	DesiredNode         string     `json:"desired_node,omitempty"`
 	SelectedSince       *time.Time `json:"selected_since"`
 	MihomoReachable     bool       `json:"mihomo_reachable"`
+	PingpongEnabled     bool       `json:"pingpong_enabled"`
 	PresentAllowedNodes int        `json:"present_allowed_nodes"`
 	LastCycleAt         *time.Time `json:"last_cycle_at"`
 	LastCycleError      string     `json:"last_cycle_error,omitempty"`
@@ -51,18 +68,28 @@ type Status struct {
 	DryRun              bool       `json:"dry_run"`
 }
 
+// NodePingpongView exposes the stored Gemini ping-pong verdict of one node.
+// "unknown" covers never-tested, stale and inconclusive results alike.
+type NodePingpongView struct {
+	Status    string     `json:"status"`
+	CheckedAt *time.Time `json:"checked_at"`
+	LatencyMS int        `json:"latency_ms,omitempty"`
+	Detail    string     `json:"detail,omitempty"`
+}
+
 type NodeStatus struct {
-	Name                 string     `json:"name"`
-	Present              bool       `json:"present"`
-	Available            bool       `json:"available"`
-	LastProbeSuccess     bool       `json:"last_probe_success"`
-	LastDelayMS          int        `json:"last_delay_ms,omitempty"`
-	EWMADelayMS          float64    `json:"ewma_delay_ms,omitempty"`
-	SuccessRate          float64    `json:"success_rate"`
-	ConsecutiveSuccesses int        `json:"consecutive_successes"`
-	ConsecutiveFailures  int        `json:"consecutive_failures"`
-	LastCheckedAt        *time.Time `json:"last_checked_at"`
-	LastError            string     `json:"last_error,omitempty"`
+	Name                 string           `json:"name"`
+	Present              bool             `json:"present"`
+	Available            bool             `json:"available"`
+	LastProbeSuccess     bool             `json:"last_probe_success"`
+	LastDelayMS          int              `json:"last_delay_ms,omitempty"`
+	EWMADelayMS          float64          `json:"ewma_delay_ms,omitempty"`
+	SuccessRate          float64          `json:"success_rate"`
+	ConsecutiveSuccesses int              `json:"consecutive_successes"`
+	ConsecutiveFailures  int              `json:"consecutive_failures"`
+	LastCheckedAt        *time.Time       `json:"last_checked_at"`
+	LastError            string           `json:"last_error,omitempty"`
+	Pingpong             NodePingpongView `json:"pingpong"`
 }
 
 type Snapshot struct {
@@ -83,6 +110,7 @@ type Manager struct {
 	logger     *slog.Logger
 	dryRun     bool
 	now        func() time.Time
+	pingpong   PingPongTester
 
 	cycleMu sync.Mutex
 	mu      sync.RWMutex
@@ -136,6 +164,10 @@ func New(cfg config.Config, controller Controller, store StateStore, logger *slo
 		now:        time.Now,
 		persist:    persisted,
 		trigger:    make(chan struct{}, 1),
+	}
+	if cfg.Pingpong.Active() {
+		m.pingpong = pingpong.New(cfg.Pingpong.BaseURL, cfg.Pingpong.APIKey, cfg.Pingpong.Model, cfg.Pingpong.Prompt, cfg.Pingpong.MaxTokens, cfg.Pingpong.TimeoutSeconds)
+		logger.Info("pingpong_enabled", "model", cfg.Pingpong.Model, "safe_node", cfg.Pingpong.SafeNode, "refresh_interval_seconds", cfg.Pingpong.RefreshIntervalSeconds)
 	}
 	m.status = Status{Group: cfg.Mihomo.Group, DryRun: dryRun}
 	m.refreshStatusLocked(m.now())
@@ -210,7 +242,6 @@ func (m *Manager) runCycleLocked(ctx context.Context) error {
 	results := m.probeAll(ctx, present, providers)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.status.MihomoReachable = true
 	m.status.GroupType = group.Type
 	m.status.ActualNode = group.Now
@@ -233,35 +264,76 @@ func (m *Manager) runCycleLocked(ctx context.Context) error {
 			m.logger.Debug("node_probe_succeeded", "node", name, "delay_ms", result.delayMS, "ewma_delay_ms", node.EWMADelayMS)
 		}
 	}
+	m.mu.Unlock()
 
+	// Re-test the node traffic currently exits through when its ping-pong
+	// verdict is missing or stale. This needs no group switch, so it never
+	// disturbs user traffic; it is what detects the current node turning dirty.
+	m.refreshPingpongCurrent(ctx, group, present, now)
+
+	m.mu.Lock()
 	target, reason := m.evaluateLocked(group, now)
-	if target != "" {
-		if m.dryRun {
-			m.status.LastDecision = fmt.Sprintf("dry-run: would select %q: %s", target, reason)
-			m.logger.Info("selection_dry_run", "node", target, "reason", reason)
-		} else {
-			actual, selectErr := m.controller.Select(ctx, m.cfg.Mihomo.Group, target)
-			if selectErr != nil {
-				m.status.LastCycleError = selectErr.Error()
-				m.status.LastDecision = fmt.Sprintf("selection of %q failed: %s", target, reason)
-				m.logger.Error("selection_failed", "node", target, "reason", reason, "error", selectErr)
-				m.refreshStatusLocked(now)
-				m.saveLocked()
-				return fmt.Errorf("select %q: %w", target, selectErr)
-			}
-			changed := m.persist.DesiredNode != target
-			m.persist.DesiredNode = target
-			if changed || m.persist.SelectedSince.IsZero() {
-				m.persist.SelectedSince = now
-			}
-			m.persist.BetterCandidate = ""
-			m.persist.BetterRounds = 0
-			m.status.ActualNode = actual.Now
-			m.status.LastDecision = fmt.Sprintf("selected %q: %s", target, reason)
-			m.logger.Info("node_selected", "node", target, "reason", reason)
+	needsTest := m.needsPingpongTestLocked(target, now)
+	m.mu.Unlock()
+
+	if needsTest && m.dryRun {
+		m.mu.Lock()
+		m.status.LastDecision = fmt.Sprintf("dry-run: would run the Gemini ping-pong test on %q before selecting it: %s", target, reason)
+		m.logger.Info("pingpong_test_dry_run", "node", target, "reason", reason)
+		m.refreshStatusLocked(now)
+		m.mu.Unlock()
+		return nil
+	}
+	tested := false
+	if needsTest {
+		// Verify an unproven candidate with the Gemini ping-pong test before
+		// committing it; dirty candidates are recorded and skipped.
+		target, reason, tested = m.resolveUnknownTarget(ctx, &group, target, reason, now)
+	}
+	return m.commitSelection(ctx, group, target, reason, tested, now)
+}
+
+// commitSelection applies the cycle's decision: select the target through the
+// Mihomo API, persist it, and record why. It expects the manager lock to be
+// free and acquires it itself.
+func (m *Manager) commitSelection(ctx context.Context, group mihomo.Group, target, reason string, tested bool, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if target == "" {
+		if reason != "" {
+			m.status.LastDecision = reason
 		}
-	} else if reason != "" {
-		m.status.LastDecision = reason
+		m.refreshStatusLocked(now)
+		m.saveLocked()
+		return nil
+	}
+	if m.dryRun {
+		m.status.LastDecision = fmt.Sprintf("dry-run: would select %q: %s", target, reason)
+		m.logger.Info("selection_dry_run", "node", target, "reason", reason)
+		m.refreshStatusLocked(now)
+		return nil
+	}
+	actual, selectErr := m.controller.Select(ctx, m.cfg.Mihomo.Group, target)
+	if selectErr != nil {
+		m.status.LastCycleError = selectErr.Error()
+		m.status.LastDecision = fmt.Sprintf("selection of %q failed: %s", target, reason)
+		m.logger.Error("selection_failed", "node", target, "reason", reason, "error", selectErr)
+		m.refreshStatusLocked(now)
+		m.saveLocked()
+		return fmt.Errorf("select %q: %w", target, selectErr)
+	}
+	changed := m.persist.DesiredNode != target
+	m.persist.DesiredNode = target
+	if changed || m.persist.SelectedSince.IsZero() {
+		m.persist.SelectedSince = now
+	}
+	m.persist.BetterCandidate = ""
+	m.persist.BetterRounds = 0
+	m.status.ActualNode = actual.Now
+	m.status.LastDecision = fmt.Sprintf("selected %q: %s", target, reason)
+	m.logger.Info("node_selected", "node", target, "reason", reason)
+	if changed && !tested {
+		m.closeGroupConnections(ctx)
 	}
 	m.refreshStatusLocked(now)
 	m.saveLocked()
@@ -361,10 +433,23 @@ func (m *Manager) evaluateLocked(group mihomo.Group, now time.Time) (string, str
 			m.persist.ManualUntil = time.Time{}
 			m.persist.BetterCandidate = ""
 			m.persist.BetterRounds = 0
-			if best := m.bestEligibleLocked(failed); best != "" {
+			if best := m.bestEligibleLocked(failed, now); best != "" {
 				return best, fmt.Sprintf("manual node %q failed; emergency failover", failed)
 			}
 			return m.reconcileLocked(group, fmt.Sprintf("manual node %q failed but no healthy alternative is available", failed))
+		}
+		if m.pingpongStateLocked(manual, now) == pingpong.StatusDirty {
+			// The manual node still has connectivity but Google now rejects its
+			// egress; keeping it would keep producing 400s.
+			if best := m.bestEligibleLocked("", now); best != "" && best != m.persist.ManualNode {
+				failed := m.persist.ManualNode
+				m.persist.ManualNode = ""
+				m.persist.ManualUntil = time.Time{}
+				m.persist.BetterCandidate = ""
+				m.persist.BetterRounds = 0
+				return best, fmt.Sprintf("manual node %q failed the Gemini ping-pong test; emergency failover", failed)
+			}
+			m.status.LastDecision = fmt.Sprintf("manual node %q failed the Gemini ping-pong test but no better allowed node is known; keeping it", m.persist.ManualNode)
 		}
 		m.persist.DesiredNode = m.persist.ManualNode
 		if selectionDrift(group, m.persist.ManualNode) {
@@ -375,7 +460,7 @@ func (m *Manager) evaluateLocked(group mihomo.Group, now time.Time) (string, str
 
 	current := m.persist.DesiredNode
 	if current == "" {
-		if node := m.persist.Nodes[group.Now]; node != nil && node.Present && node.LastProbeSuccess {
+		if node := m.persist.Nodes[group.Now]; node != nil && node.Present && node.LastProbeSuccess && m.pingpongStateLocked(node, now) != pingpong.StatusDirty {
 			m.persist.DesiredNode = group.Now
 			m.persist.SelectedSince = now
 			if selectionDrift(group, group.Now) {
@@ -383,7 +468,7 @@ func (m *Manager) evaluateLocked(group mihomo.Group, now time.Time) (string, str
 			}
 			return "", fmt.Sprintf("adopted current allowed node %q", group.Now)
 		}
-		if best := m.bestEligibleLocked(""); best != "" {
+		if best := m.bestEligibleLocked("", now); best != "" {
 			return best, "initial selection of lowest-latency healthy allowed node"
 		}
 		return "", "no allowed node has a successful probe; no selection issued"
@@ -391,13 +476,22 @@ func (m *Manager) evaluateLocked(group mihomo.Group, now time.Time) (string, str
 
 	currentState := m.persist.Nodes[current]
 	if currentState == nil || !currentState.Present || currentState.ConsecutiveFailures >= m.cfg.Policy.FailureThreshold {
-		if best := m.bestEligibleLocked(current); best != "" {
+		if best := m.bestEligibleLocked(current, now); best != "" {
 			return best, fmt.Sprintf("current node %q is unavailable; emergency failover", current)
 		}
 		return m.reconcileLocked(group, fmt.Sprintf("current node %q is unavailable but no healthy alternative exists", current))
 	}
+	if m.pingpongStateLocked(currentState, now) == pingpong.StatusDirty {
+		if safe := m.safeNodeCandidateLocked(current, now); safe != "" {
+			return safe, fmt.Sprintf("current node %q failed the Gemini ping-pong test; trying the configured safe node", current)
+		}
+		if best := m.bestEligibleLocked("", now); best != "" && best != current {
+			return best, fmt.Sprintf("current node %q failed the Gemini ping-pong test; emergency failover", current)
+		}
+		return m.reconcileLocked(group, fmt.Sprintf("current node %q failed the Gemini ping-pong test but no better allowed node exists; keeping it", current))
+	}
 
-	best := m.bestEligibleLocked(current)
+	best := m.bestEligibleLocked(current, now)
 	if best != "" && m.materiallyBetterLocked(best, current) {
 		if m.persist.BetterCandidate == best {
 			m.persist.BetterRounds++
@@ -443,9 +537,18 @@ func (m *Manager) materiallyBetterLocked(candidate, current string) bool {
 	return difference >= float64(m.cfg.Policy.ImprovementMS) || candidateDelay <= currentDelay*(1-m.cfg.Policy.ImprovementRatio)
 }
 
-func (m *Manager) bestEligibleLocked(exclude string) string {
-	best := ""
-	bestDelay := 0.0
+// bestEligibleLocked returns the fastest probe-healthy allowed node under the
+// Gemini ping-pong constraint, in strict priority order:
+//
+//  1. among nodes known to pass the ping-pong test,
+//  2. among nodes not known to fail it (never tested, stale or inconclusive),
+//  3. among all probe-healthy nodes - only when every candidate is marked
+//     dirty, dropping the constraint so the fastest node still wins.
+//
+// With the ping-pong probe disabled the pool degenerates to the original
+// pure-latency behaviour.
+func (m *Manager) bestEligibleLocked(exclude string, now time.Time) string {
+	alive := make([]string, 0, len(m.cfg.AllowedNodes))
 	for _, name := range m.cfg.AllowedNodes {
 		if name == exclude {
 			continue
@@ -454,12 +557,211 @@ func (m *Manager) bestEligibleLocked(exclude string) string {
 		if node == nil || !node.Present || !node.Available || !node.LastProbeSuccess || node.EWMADelayMS <= 0 {
 			continue
 		}
-		if best == "" || node.EWMADelayMS < bestDelay {
+		alive = append(alive, name)
+	}
+	if len(alive) == 0 {
+		return ""
+	}
+	if m.pingpong != nil {
+		passing := make([]string, 0, len(alive))
+		notDirty := make([]string, 0, len(alive))
+		for _, name := range alive {
+			switch m.pingpongStateLocked(m.persist.Nodes[name], now) {
+			case pingpong.StatusPass:
+				passing = append(passing, name)
+			case pingpong.StatusDirty:
+			default:
+				notDirty = append(notDirty, name)
+			}
+		}
+		switch {
+		case len(passing) > 0:
+			return m.fastestOfLocked(passing)
+		case len(notDirty) > 0:
+			return m.fastestOfLocked(notDirty)
+		}
+		m.logger.Warn("pingpong_constraint_dropped", "reason", "every probe-healthy allowed node is marked dirty; falling back to pure latency selection")
+	}
+	return m.fastestOfLocked(alive)
+}
+
+func (m *Manager) fastestOfLocked(names []string) string {
+	best := ""
+	bestDelay := 0.0
+	for _, name := range names {
+		delay := m.persist.Nodes[name].EWMADelayMS
+		if best == "" || delay < bestDelay {
 			best = name
-			bestDelay = node.EWMADelayMS
+			bestDelay = delay
 		}
 	}
 	return best
+}
+
+// pingpongStateLocked classifies a node's stored ping-pong verdict with its
+// freshness window: "pass" stays valid for refresh_interval_seconds, "dirty"
+// for fail_ttl_seconds, and anything else (never tested, inconclusive, stale)
+// maps to "" - meaning "unknown, worth testing".
+func (m *Manager) pingpongStateLocked(node *state.Node, now time.Time) pingpong.Status {
+	if node == nil || node.PingpongCheckedAt.IsZero() {
+		return ""
+	}
+	age := now.Sub(node.PingpongCheckedAt)
+	switch pingpong.Status(node.PingpongStatus) {
+	case pingpong.StatusPass:
+		if age <= time.Duration(m.cfg.Pingpong.RefreshIntervalSeconds)*time.Second {
+			return pingpong.StatusPass
+		}
+	case pingpong.StatusDirty:
+		if age <= time.Duration(m.cfg.Pingpong.FailTTLSeconds)*time.Second {
+			return pingpong.StatusDirty
+		}
+	}
+	return ""
+}
+
+// pingpongStaleLocked reports whether a node's stored verdict should be
+// refreshed by a new test. Inconclusive results also age out so a CPA outage
+// does not pin stale knowledge forever.
+func (m *Manager) pingpongStaleLocked(node *state.Node, now time.Time) bool {
+	if node == nil || node.PingpongStatus == "" || node.PingpongCheckedAt.IsZero() {
+		return true
+	}
+	return now.Sub(node.PingpongCheckedAt) >= time.Duration(m.cfg.Pingpong.RefreshIntervalSeconds)*time.Second
+}
+
+// needsPingpongTestLocked reports whether selecting name requires a ping-pong
+// test first: the probe must be active, the node must differ from the already
+// committed selection, and its verdict must be unknown.
+func (m *Manager) needsPingpongTestLocked(name string, now time.Time) bool {
+	if m.pingpong == nil || name == "" || name == m.persist.DesiredNode {
+		return false
+	}
+	return m.pingpongStateLocked(m.persist.Nodes[name], now) == ""
+}
+
+func (m *Manager) recordPingpongLocked(node *state.Node, result pingpong.Result, now time.Time) {
+	if node == nil {
+		return
+	}
+	node.PingpongStatus = string(result.Status)
+	node.PingpongCheckedAt = now
+	node.PingpongLatencyMS = result.LatencyMS
+	node.PingpongDetail = result.Detail
+}
+
+// safeNodeCandidateLocked returns the configured safe node when it is a
+// plausible alternative to a dirty current node: present, healthy and not
+// itself known dirty. It is a testing preference, never an unconditional
+// choice - the candidate still has to pass the ping-pong test.
+func (m *Manager) safeNodeCandidateLocked(current string, now time.Time) string {
+	safe := m.cfg.Pingpong.SafeNode
+	if safe == "" || safe == current {
+		return ""
+	}
+	node := m.persist.Nodes[safe]
+	if node == nil || !node.Present || !node.Available || !node.LastProbeSuccess {
+		return ""
+	}
+	if m.pingpongStateLocked(node, now) == pingpong.StatusDirty {
+		return ""
+	}
+	return safe
+}
+
+// refreshPingpongCurrent re-tests the node traffic currently exits through
+// whenever its verdict is missing or stale. No group switch is involved.
+func (m *Manager) refreshPingpongCurrent(ctx context.Context, group mihomo.Group, present map[string]bool, now time.Time) {
+	if m.pingpong == nil {
+		return
+	}
+	m.mu.Lock()
+	current := m.persist.DesiredNode
+	if current == "" {
+		current = group.Now
+	}
+	node := m.persist.Nodes[current]
+	needed := current != "" && present[current] && node != nil && node.Available && m.pingpongStaleLocked(node, now)
+	m.mu.Unlock()
+	if !needed {
+		return
+	}
+	result := m.pingpong.Test(ctx)
+	m.mu.Lock()
+	m.recordPingpongLocked(m.persist.Nodes[current], result, now)
+	m.mu.Unlock()
+	m.logger.Info("pingpong_current_tested", "node", current, "status", result.Status, "latency_ms", result.LatencyMS, "detail", result.Detail)
+}
+
+// runPingpongTest points the policy group at target (unless traffic already
+// exits through it), drops the group's stale connections so the CPA re-dials
+// through the new node, and performs one ping-pong request.
+func (m *Manager) runPingpongTest(ctx context.Context, group *mihomo.Group, target string) pingpong.Result {
+	if group.Now != target {
+		actual, err := m.controller.Select(ctx, m.cfg.Mihomo.Group, target)
+		if err != nil {
+			return pingpong.Result{Status: pingpong.StatusInconclusive, Detail: fmt.Sprintf("switching to %q for the test failed: %v", target, err)}
+		}
+		group.Now = actual.Now
+		group.Fixed = actual.Fixed
+	}
+	if !m.dryRun {
+		m.closeGroupConnections(ctx)
+	}
+	return m.pingpong.Test(ctx)
+}
+
+// resolveUnknownTarget runs the ping-pong test on candidates whose verdict is
+// unknown, switching the group to each candidate for the duration of its test.
+// Dirty candidates are recorded and excluded, and the next candidate is picked
+// by the ordinary selection policy. The first candidate that passes - or that
+// comes back inconclusive - is returned for the caller to commit.
+func (m *Manager) resolveUnknownTarget(ctx context.Context, group *mihomo.Group, target, reason string, now time.Time) (string, string, bool) {
+	tested := false
+	for attempt := 0; target != "" && attempt <= len(m.cfg.AllowedNodes); attempt++ {
+		result := m.runPingpongTest(ctx, group, target)
+		tested = true
+		m.mu.Lock()
+		m.recordPingpongLocked(m.persist.Nodes[target], result, now)
+		if result.Status != pingpong.StatusDirty {
+			m.mu.Unlock()
+			if result.Status == pingpong.StatusPass {
+				reason += " (Gemini ping-pong passed)"
+			} else {
+				reason += fmt.Sprintf(" (Gemini ping-pong inconclusive: %s)", result.Detail)
+			}
+			return target, reason, tested
+		}
+		m.logger.Warn("pingpong_candidate_dirty", "node", target, "detail", result.Detail)
+		target, reason = m.evaluateLocked(*group, now)
+		done := target == "" || !m.needsPingpongTestLocked(target, now)
+		m.mu.Unlock()
+		if done {
+			return target, reason, tested
+		}
+	}
+	return target, reason, tested
+}
+
+// closeGroupConnections drops every active connection that traverses the
+// policy group so clients re-dial through the newly selected node. Best
+// effort by design; controlled by pingpong.close_conns_on_switch.
+func (m *Manager) closeGroupConnections(ctx context.Context) {
+	if !m.cfg.Pingpong.CloseConnsOnSwitch {
+		return
+	}
+	closer, ok := m.controller.(ConnectionCloser)
+	if !ok {
+		return
+	}
+	closed, err := closer.CloseGroupConnections(ctx, m.cfg.Mihomo.Group)
+	if err != nil {
+		m.logger.Warn("close_group_connections_failed", "group", m.cfg.Mihomo.Group, "closed", closed, "error", err)
+		return
+	}
+	if closed > 0 {
+		m.logger.Info("closed_group_connections", "group", m.cfg.Mihomo.Group, "closed", closed)
+	}
 }
 
 func (m *Manager) ManualSwitch(ctx context.Context, nodeName string, force bool) (Snapshot, error) {
@@ -506,6 +808,9 @@ func (m *Manager) ManualSwitch(ctx context.Context, nodeName string, force bool)
 			return m.Snapshot(), &OperationError{Code: "probe_failed", Err: fmt.Errorf("probe %q: %w", nodeName, probeErr)}
 		}
 	}
+	if gateErr := m.pingpongGate(ctx, &group, nodeName, force, now); gateErr != nil {
+		return m.Snapshot(), gateErr
+	}
 	actual, err := m.controller.Select(ctx, m.cfg.Mihomo.Group, nodeName)
 	if err != nil {
 		return m.Snapshot(), &OperationError{Code: "selection_failed", Err: err}
@@ -526,6 +831,179 @@ func (m *Manager) ManualSwitch(ctx context.Context, nodeName string, force bool)
 	m.mu.Unlock()
 	m.logger.Info("manual_switch", "node", nodeName, "force", force, "until", now.Add(time.Duration(m.cfg.Policy.ManualOverrideSeconds)*time.Second))
 	return m.Snapshot(), nil
+}
+
+// pingpongGate refuses manual switches to nodes that are known or suspected to
+// fail the Gemini ping-pong test. A fresh pass is accepted silently; an unknown
+// or stale verdict is tested first, switching the group to the candidate for
+// the duration of the request and restoring the previous selection when the
+// candidate comes back dirty. force=true bypasses the gate entirely.
+func (m *Manager) pingpongGate(ctx context.Context, group *mihomo.Group, nodeName string, force bool, now time.Time) error {
+	if m.pingpong == nil || force {
+		return nil
+	}
+	m.mu.Lock()
+	node := m.persist.Nodes[nodeName]
+	verdict := m.pingpongStateLocked(node, now)
+	stale := m.pingpongStaleLocked(node, now)
+	m.mu.Unlock()
+	if verdict == pingpong.StatusDirty {
+		return &OperationError{Code: "pingpong_failed", Err: fmt.Errorf("node %q recently failed the Gemini ping-pong test; use force to override", nodeName)}
+	}
+	if verdict == pingpong.StatusPass && !stale {
+		return nil
+	}
+	previous := group.Now
+	result := m.runPingpongTest(ctx, group, nodeName)
+	m.mu.Lock()
+	m.recordPingpongLocked(m.persist.Nodes[nodeName], result, now)
+	m.mu.Unlock()
+	switch result.Status {
+	case pingpong.StatusPass:
+		return nil
+	case pingpong.StatusInconclusive:
+		m.logger.Warn("pingpong_gate_inconclusive", "node", nodeName, "detail", result.Detail)
+		return nil
+	default:
+		if previous != nodeName {
+			if _, err := m.controller.Select(ctx, m.cfg.Mihomo.Group, previous); err != nil {
+				m.logger.Error("pingpong_gate_restore_failed", "node", previous, "error", err)
+			} else {
+				group.Now = previous
+				group.Fixed = previous
+			}
+		}
+		return &OperationError{Code: "pingpong_failed", Err: fmt.Errorf("node %q failed the Gemini ping-pong test (%s); selection restored to %q; use force to override", nodeName, result.Detail, previous)}
+	}
+}
+
+// PingpongCheckResult is one node's outcome of an on-demand ping-pong check.
+type PingpongCheckResult struct {
+	Node      string `json:"node"`
+	Status    string `json:"status"`
+	LatencyMS int    `json:"latency_ms,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// PingpongReport is the response of POST /v1/pingpong.
+type PingpongReport struct {
+	Results  []PingpongCheckResult `json:"results"`
+	Snapshot Snapshot              `json:"snapshot"`
+}
+
+// PingpongCheck runs the CPA Gemini ping-pong test on demand. Without a node
+// name it tests whatever the traffic currently exits through (no switching).
+// With a node name it briefly switches to that node, tests it, and restores
+// the previous selection. With force it sweeps every present allowed node and
+// lands the group on the node the ordinary selection policy would pick.
+func (m *Manager) PingpongCheck(ctx context.Context, nodeName string, force bool) (PingpongReport, error) {
+	m.cycleMu.Lock()
+	defer m.cycleMu.Unlock()
+	report := PingpongReport{Results: []PingpongCheckResult{}}
+	if m.pingpong == nil {
+		return report, &OperationError{Code: "pingpong_disabled", Err: errors.New("the Gemini ping-pong test is not configured; set CPA_BASE_URL and CPA_MODEL")}
+	}
+	group, err := m.controller.Group(ctx, m.cfg.Mihomo.Group)
+	if err != nil {
+		return report, &OperationError{Code: "mihomo_unavailable", Err: err}
+	}
+	present := make(map[string]bool, len(group.All))
+	for _, member := range group.All {
+		present[member] = true
+	}
+	now := m.now()
+	if force {
+		if m.dryRun {
+			return report, &OperationError{Code: "dry_run", Err: errors.New("a full ping-pong sweep switches nodes and is disabled in dry-run mode")}
+		}
+		m.runPingpongSweep(ctx, &group, present, now, &report)
+		report.Snapshot = m.Snapshot()
+		return report, nil
+	}
+	target := nodeName
+	if target == "" {
+		target = group.Now
+	}
+	if !m.allowed(target) {
+		return report, &OperationError{Code: "node_not_allowed", Err: fmt.Errorf("node %q is not in allowed_nodes", target)}
+	}
+	if !present[target] {
+		return report, &OperationError{Code: "node_not_present", Err: fmt.Errorf("node %q is not present in group %q", target, m.cfg.Mihomo.Group)}
+	}
+	if m.dryRun && group.Now != target {
+		return report, &OperationError{Code: "dry_run", Err: fmt.Errorf("testing %q requires switching the group, which is disabled in dry-run mode", target)}
+	}
+	origin := group.Now
+	result := m.runPingpongTest(ctx, &group, target)
+	m.mu.Lock()
+	m.recordPingpongLocked(m.persist.Nodes[target], result, now)
+	m.mu.Unlock()
+	report.Results = append(report.Results, PingpongCheckResult{Node: target, Status: string(result.Status), LatencyMS: result.LatencyMS, Detail: result.Detail})
+	if origin != target {
+		if _, err := m.controller.Select(ctx, m.cfg.Mihomo.Group, origin); err != nil {
+			m.logger.Error("pingpong_check_restore_failed", "node", origin, "error", err)
+		} else {
+			m.closeGroupConnections(ctx)
+		}
+	}
+	report.Snapshot = m.Snapshot()
+	return report, nil
+}
+
+// runPingpongSweep tests every present allowed node in turn and lands the
+// group on the node the selection policy would choose with fresh verdicts for
+// all of them. Manual mode is respected: the manual node is restored.
+func (m *Manager) runPingpongSweep(ctx context.Context, group *mihomo.Group, present map[string]bool, now time.Time, report *PingpongReport) {
+	origin := group.Now
+	m.mu.Lock()
+	manual := m.persist.ManualNode != "" && now.Before(m.persist.ManualUntil)
+	m.mu.Unlock()
+	for _, name := range m.cfg.AllowedNodes {
+		if !present[name] {
+			continue
+		}
+		result := m.runPingpongTest(ctx, group, name)
+		m.mu.Lock()
+		m.recordPingpongLocked(m.persist.Nodes[name], result, now)
+		m.mu.Unlock()
+		report.Results = append(report.Results, PingpongCheckResult{Node: name, Status: string(result.Status), LatencyMS: result.LatencyMS, Detail: result.Detail})
+	}
+	final := ""
+	m.mu.Lock()
+	if manual {
+		final = m.persist.ManualNode
+	} else {
+		final = m.bestEligibleLocked("", now)
+	}
+	m.mu.Unlock()
+	if final == "" {
+		final = origin
+	}
+	if final != group.Now {
+		actual, err := m.controller.Select(ctx, m.cfg.Mihomo.Group, final)
+		if err != nil {
+			m.logger.Error("pingpong_sweep_final_selection_failed", "node", final, "error", err)
+		} else {
+			group.Now = actual.Now
+			group.Fixed = actual.Fixed
+			m.closeGroupConnections(ctx)
+		}
+	}
+	m.mu.Lock()
+	if !manual {
+		if m.persist.DesiredNode != final {
+			m.persist.DesiredNode = final
+			m.persist.SelectedSince = now
+		}
+		m.persist.BetterCandidate = ""
+		m.persist.BetterRounds = 0
+	}
+	m.status.LastDecision = fmt.Sprintf("Gemini ping-pong sweep completed; group now on %q", final)
+	m.refreshStatusLocked(now)
+	m.saveLocked()
+	m.mu.Unlock()
+	m.logger.Info("pingpong_sweep_completed", "final_node", final, "results", len(report.Results))
 }
 
 func (m *Manager) ResumeAuto(ctx context.Context) (Snapshot, error) {
@@ -555,7 +1033,7 @@ func (m *Manager) Snapshot() Snapshot {
 	nodes := make([]NodeStatus, 0, len(m.cfg.AllowedNodes))
 	for _, name := range m.cfg.AllowedNodes {
 		node := m.persist.Nodes[name]
-		view := NodeStatus{Name: name}
+		view := NodeStatus{Name: name, Pingpong: NodePingpongView{Status: "unknown"}}
 		if node != nil {
 			view.Present = node.Present
 			view.Available = node.Available
@@ -568,6 +1046,14 @@ func (m *Manager) Snapshot() Snapshot {
 			view.LastError = node.LastError
 			if !node.LastCheckedAt.IsZero() {
 				view.LastCheckedAt = timePtr(node.LastCheckedAt)
+			}
+			if node.PingpongStatus != "" {
+				view.Pingpong.Status = node.PingpongStatus
+				view.Pingpong.LatencyMS = node.PingpongLatencyMS
+				view.Pingpong.Detail = node.PingpongDetail
+				if !node.PingpongCheckedAt.IsZero() {
+					view.Pingpong.CheckedAt = timePtr(node.PingpongCheckedAt)
+				}
 			}
 		}
 		nodes = append(nodes, view)
@@ -593,6 +1079,7 @@ func (m *Manager) allowed(name string) bool {
 func (m *Manager) refreshStatusLocked(now time.Time) {
 	m.status.DesiredNode = m.persist.DesiredNode
 	m.status.Mode = m.modeLocked(now)
+	m.status.PingpongEnabled = m.pingpong != nil
 	if m.status.MihomoReachable && m.status.PresentAllowedNodes > 0 {
 		m.status.Status = "ok"
 	} else {
