@@ -51,19 +51,28 @@ type PolicyConfig struct {
 	ManualOverrideSeconds int     `toml:"manual_override_seconds"`
 }
 
+// PingpongDirtyMatchConfig describes when a non-2xx ping-pong response proves
+// the egress node unusable ("dirty"). The built-in default matches the Gemini
+// location ban; this section overrides it for other providers.
+type PingpongDirtyMatchConfig struct {
+	Status       int      `toml:"status"`
+	BodyContains []string `toml:"body_contains"`
+}
+
 // PingpongConfig drives the CPA Gemini ping-pong probe. The endpoint, API key
 // and model come from the environment (optionally seeded by env_file) so that
 // secrets stay out of config.toml.
 type PingpongConfig struct {
-	EnvFile                string `toml:"env_file"`
-	Enabled                bool   `toml:"enabled"`
-	RefreshIntervalSeconds int    `toml:"refresh_interval_seconds"`
-	FailTTLSeconds         int    `toml:"fail_ttl_seconds"`
-	TimeoutSeconds         int    `toml:"timeout_seconds"`
-	MaxTokens              int    `toml:"max_tokens"`
-	Prompt                 string `toml:"prompt"`
-	SafeNode               string `toml:"safe_node"`
-	CloseConnsOnSwitch     bool   `toml:"close_conns_on_switch"`
+	EnvFile                string                    `toml:"env_file"`
+	Enabled                bool                      `toml:"enabled"`
+	RefreshIntervalSeconds int                       `toml:"refresh_interval_seconds"`
+	FailTTLSeconds         int                       `toml:"fail_ttl_seconds"`
+	TimeoutSeconds         int                       `toml:"timeout_seconds"`
+	MaxTokens              int                       `toml:"max_tokens"`
+	Prompt                 string                    `toml:"prompt"`
+	SafeNode               string                    `toml:"safe_node"`
+	CloseConnsOnSwitch     bool                      `toml:"close_conns_on_switch"`
+	DirtyMatch             *PingpongDirtyMatchConfig `toml:"dirty_match"`
 
 	// Resolved from the CPA_* environment variables; never set from TOML.
 	BaseURL string `toml:"-"`
@@ -240,6 +249,19 @@ func (c Config) Validate() error {
 		}
 		if c.Pingpong.SafeNode != "" && !containsNode(c.AllowedNodes, c.Pingpong.SafeNode) {
 			errs = append(errs, errors.New("pingpong.safe_node must be one of allowed_nodes"))
+		}
+	}
+	if dm := c.Pingpong.DirtyMatch; dm != nil {
+		if dm.Status < 400 || dm.Status > 599 {
+			errs = append(errs, errors.New("pingpong.dirty_match.status must be an HTTP status code between 400 and 599"))
+		}
+		if len(dm.BodyContains) == 0 {
+			errs = append(errs, errors.New("pingpong.dirty_match.body_contains must list at least one substring"))
+		}
+		for i, needle := range dm.BodyContains {
+			if strings.TrimSpace(needle) == "" {
+				errs = append(errs, fmt.Errorf("pingpong.dirty_match.body_contains[%d] is empty", i))
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(c.API.Listen)

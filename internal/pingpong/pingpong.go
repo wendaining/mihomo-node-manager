@@ -24,7 +24,8 @@ const (
 	StatusPass Status = "pass"
 	// StatusDirty means Google rejected the request with the location ban
 	// (HTTP 400, "User location is not supported"): the egress node triggers
-	// the risk control.
+	// the risk control. The exact match rule is configurable through
+	// pingpong.dirty_match; DefaultRules holds the built-in Gemini rule.
 	StatusDirty Status = "dirty"
 	// StatusInconclusive covers everything else - CPA auth refresh (503
 	// auth_unavailable), rate limits, outages, timeouts. It says nothing
@@ -38,12 +39,30 @@ type Result struct {
 	Detail    string
 }
 
+// Rules describes when a non-2xx response proves the egress node unusable.
+// A response is "dirty" when its HTTP status equals Status and its body
+// contains any one of the BodyContains substrings (case-insensitive).
+type Rules struct {
+	Status       int
+	BodyContains []string
+}
+
+// DefaultRules returns the Gemini location-ban rule: HTTP 400 carrying the
+// "User location is not supported" / FAILED_PRECONDITION marker.
+func DefaultRules() Rules {
+	return Rules{
+		Status:       http.StatusBadRequest,
+		BodyContains: []string{"user location is not supported", "failed_precondition"},
+	}
+}
+
 type Tester struct {
 	endpoint  string
 	apiKey    string
 	model     string
 	prompt    string
 	maxTokens int
+	rules     Rules
 	client    *http.Client
 }
 
@@ -66,12 +85,19 @@ func NormalizeEndpoint(base string) string {
 }
 
 func New(endpoint, apiKey, model, prompt string, maxTokens, timeoutSeconds int) *Tester {
+	return NewWithRules(endpoint, apiKey, model, prompt, maxTokens, timeoutSeconds, DefaultRules())
+}
+
+// NewWithRules builds a tester whose dirty verdict follows the given match
+// rules instead of DefaultRules.
+func NewWithRules(endpoint, apiKey, model, prompt string, maxTokens, timeoutSeconds int, rules Rules) *Tester {
 	return &Tester{
 		endpoint:  NormalizeEndpoint(endpoint),
 		apiKey:    strings.TrimSpace(apiKey),
 		model:     model,
 		prompt:    prompt,
 		maxTokens: maxTokens,
+		rules:     rules,
 		client:    &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second},
 	}
 }
@@ -111,7 +137,7 @@ func (t *Tester) do(ctx context.Context) Result {
 	if readErr != nil {
 		return Result{Status: StatusInconclusive, Detail: fmt.Sprintf("read response: %v", readErr)}
 	}
-	status, detail := Classify(resp.StatusCode, body)
+	status, detail := ClassifyWith(t.rules, resp.StatusCode, body)
 	return Result{Status: status, Detail: detail}
 }
 
@@ -127,22 +153,39 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// Classify maps a CPA response to a ping-pong verdict. Only the Gemini
-// location ban (HTTP 400) proves a node is dirty. Everything else - including
-// the 503 auth_unavailable responses the CPA emits while refreshing its OAuth
-// credentials - is inconclusive, so a CPA side outage can never cause nodes to
-// be marked dirty or trigger failovers.
+// Classify maps a CPA response to a ping-pong verdict using the built-in
+// Gemini rules. Only the Gemini location ban (HTTP 400) proves a node is
+// dirty. Everything else - including the 503 auth_unavailable responses the
+// CPA emits while refreshing its OAuth credentials - is inconclusive, so a CPA
+// side outage can never cause nodes to be marked dirty or trigger failovers.
 func Classify(statusCode int, body []byte) (Status, string) {
+	return ClassifyWith(DefaultRules(), statusCode, body)
+}
+
+// ClassifyWith is Classify with a caller supplied dirty-match rule. The 2xx
+// "pass" and the inconclusive fallback are not configurable.
+func ClassifyWith(rules Rules, statusCode int, body []byte) (Status, string) {
 	snippet := collapseWhitespace(string(body))
 	if statusCode >= 200 && statusCode < 300 {
 		return StatusPass, "pong: " + extractContent(body)
 	}
 	lower := strings.ToLower(snippet)
-	if statusCode == http.StatusBadRequest &&
-		(strings.Contains(lower, "user location is not supported") || strings.Contains(lower, "failed_precondition")) {
+	if statusCode == rules.Status && matchesAny(lower, rules.BodyContains) {
 		return StatusDirty, snippet
 	}
 	return StatusInconclusive, fmt.Sprintf("HTTP %d: %s", statusCode, snippet)
+}
+
+func matchesAny(lowerBody string, needles []string) bool {
+	for _, needle := range needles {
+		if needle == "" {
+			continue
+		}
+		if strings.Contains(lowerBody, strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractContent(body []byte) string {

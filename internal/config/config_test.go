@@ -148,6 +148,54 @@ func TestPingpongValidation(t *testing.T) {
 	})
 }
 
+func TestPingpongDirtyMatchValidation(t *testing.T) {
+	clearCPAEnv(t)
+	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseText := string(original)
+	load := func(text string) error {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		return err
+	}
+
+	t.Run("custom rules are accepted even while the probe is inactive", func(t *testing.T) {
+		text := baseText + "\n[pingpong.dirty_match]\nstatus = 503\nbody_contains = [\"auth_unavailable\"]\n"
+		if err := load(text); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+
+	t.Run("status outside 400-599 is rejected", func(t *testing.T) {
+		text := baseText + "\n[pingpong.dirty_match]\nstatus = 200\nbody_contains = [\"x\"]\n"
+		err := load(text)
+		if err == nil || !strings.Contains(err.Error(), "dirty_match.status") {
+			t.Fatalf("Load() error = %v, want a dirty_match.status error", err)
+		}
+	})
+
+	t.Run("empty body_contains is rejected", func(t *testing.T) {
+		text := baseText + "\n[pingpong.dirty_match]\nstatus = 400\nbody_contains = []\n"
+		err := load(text)
+		if err == nil || !strings.Contains(err.Error(), "body_contains") {
+			t.Fatalf("Load() error = %v, want a body_contains error", err)
+		}
+	})
+
+	t.Run("blank body_contains entry is rejected", func(t *testing.T) {
+		text := baseText + "\n[pingpong.dirty_match]\nstatus = 400\nbody_contains = [\" \"]\n"
+		err := load(text)
+		if err == nil || !strings.Contains(err.Error(), "body_contains") {
+			t.Fatalf("Load() error = %v, want a body_contains error", err)
+		}
+	})
+}
+
 func TestLoadRejectsUnknownAndUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name string

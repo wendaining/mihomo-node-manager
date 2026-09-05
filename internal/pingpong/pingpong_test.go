@@ -95,6 +95,49 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestClassifyWithCustomRules(t *testing.T) {
+	custom := Rules{Status: 503, BodyContains: []string{"Auth_Unavailable"}}
+
+	// A response the built-in rules treat as inconclusive becomes dirty.
+	status, detail := ClassifyWith(custom, 503, []byte(`{"error":{"message":"auth_unavailable: no auth available"}}`))
+	if status != StatusDirty || detail == "" {
+		t.Fatalf("ClassifyWith(custom, 503) = %q (%q), want dirty", status, detail)
+	}
+
+	// The custom rule stops covering the Gemini location ban.
+	if status, _ := ClassifyWith(custom, http.StatusBadRequest, []byte(`{'error': {'message': 'User location is not supported'}}`)); status != StatusInconclusive {
+		t.Fatalf("ClassifyWith(custom, 400) = %q, want inconclusive", status)
+	}
+
+	// Body matching stays case-insensitive.
+	if status, _ := ClassifyWith(custom, 503, []byte("AUTH_UNAVAILABLE upstream")); status != StatusDirty {
+		t.Fatalf("ClassifyWith(custom, uppercase body) = %q, want dirty", status)
+	}
+
+	// Built-in rules keep the Gemini ban dirty.
+	if status, _ := ClassifyWith(DefaultRules(), 400, []byte(`{'error': {'status': 'FAILED_PRECONDITION'}}`)); status != StatusDirty {
+		t.Fatalf("ClassifyWith(default, 400) = %q, want dirty", status)
+	}
+}
+
+func TestTesterUsesConfiguredRules(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"auth_unavailable"}}`))
+	}))
+	defer server.Close()
+
+	builtin := New(server.URL, "", "model", "ping", 16, 5)
+	if result := builtin.Test(context.Background()); result.Status != StatusInconclusive {
+		t.Fatalf("default rules: Test() = %+v, want inconclusive", result)
+	}
+
+	custom := NewWithRules(server.URL, "", "model", "ping", 16, 5, Rules{Status: 503, BodyContains: []string{"auth_unavailable"}})
+	if result := custom.Test(context.Background()); result.Status != StatusDirty {
+		t.Fatalf("custom rules: Test() = %+v, want dirty", result)
+	}
+}
+
 func TestTesterSendsModelPromptAndKey(t *testing.T) {
 	var gotPath, gotKey, gotModel, gotPrompt string
 	var gotStream bool

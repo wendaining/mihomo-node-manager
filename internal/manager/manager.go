@@ -166,8 +166,14 @@ func New(cfg config.Config, controller Controller, store StateStore, logger *slo
 		trigger:    make(chan struct{}, 1),
 	}
 	if cfg.Pingpong.Active() {
-		m.pingpong = pingpong.New(cfg.Pingpong.BaseURL, cfg.Pingpong.APIKey, cfg.Pingpong.Model, cfg.Pingpong.Prompt, cfg.Pingpong.MaxTokens, cfg.Pingpong.TimeoutSeconds)
-		logger.Info("pingpong_enabled", "model", cfg.Pingpong.Model, "safe_node", cfg.Pingpong.SafeNode, "refresh_interval_seconds", cfg.Pingpong.RefreshIntervalSeconds)
+		rules := pingpong.DefaultRules()
+		dirtyMatch := "default"
+		if dm := cfg.Pingpong.DirtyMatch; dm != nil {
+			rules = pingpong.Rules{Status: dm.Status, BodyContains: dm.BodyContains}
+			dirtyMatch = "custom"
+		}
+		m.pingpong = pingpong.NewWithRules(cfg.Pingpong.BaseURL, cfg.Pingpong.APIKey, cfg.Pingpong.Model, cfg.Pingpong.Prompt, cfg.Pingpong.MaxTokens, cfg.Pingpong.TimeoutSeconds, rules)
+		logger.Info("pingpong_enabled", "model", cfg.Pingpong.Model, "safe_node", cfg.Pingpong.SafeNode, "refresh_interval_seconds", cfg.Pingpong.RefreshIntervalSeconds, "dirty_match", dirtyMatch)
 	}
 	m.status = Status{Group: cfg.Mihomo.Group, DryRun: dryRun}
 	m.refreshStatusLocked(m.now())
