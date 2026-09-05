@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadExampleConfig(t *testing.T) {
-	path := filepath.Join("..", "..", "config", "config.toml")
+	path := filepath.Join("..", "..", "config", "config.example.toml")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -25,13 +25,13 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.Pingpong.Active() {
 		t.Fatal("pingpong must stay inactive until CPA_BASE_URL and CPA_MODEL are configured")
 	}
-	if cfg.Pingpong.SafeNode != "US-Reality-device-1" {
-		t.Fatalf("safe_node = %q", cfg.Pingpong.SafeNode)
+	if cfg.Pingpong.SafeNode != "" {
+		t.Fatalf("safe_node = %q, want the empty default", cfg.Pingpong.SafeNode)
 	}
 }
 
 func TestPingpongEnvironmentLoading(t *testing.T) {
-	repoConfig, err := filepath.Abs(filepath.Join("..", "..", "config", "config.toml"))
+	repoConfig, err := filepath.Abs(filepath.Join("..", "..", "config", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func clearCPAEnv(t *testing.T) {
 
 func TestPingpongValidation(t *testing.T) {
 	clearCPAEnv(t)
-	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.toml"))
+	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestPingpongValidation(t *testing.T) {
 		if err := os.WriteFile(".env", []byte("CPA_BASE_URL=http://127.0.0.1:8317\nCPA_MODEL=m\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		text := strings.Replace(baseText, `safe_node = "US-Reality-device-1"`, `safe_node = "Evil Node"`, 1)
+		text := strings.Replace(baseText, `safe_node = ""`, `safe_node = "Evil Node"`, 1)
 		err := load(text)
 		if err == nil || !strings.Contains(err.Error(), "safe_node") {
 			t.Fatalf("Load() error = %v, want a safe_node error", err)
@@ -150,7 +150,7 @@ func TestPingpongValidation(t *testing.T) {
 
 func TestPingpongDirtyMatchValidation(t *testing.T) {
 	clearCPAEnv(t)
-	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.toml"))
+	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,12 +215,12 @@ func TestLoadRejectsUnknownAndUnsafeValues(t *testing.T) {
 		{
 			name: "duplicate node",
 			edit: func(text string) string {
-				return strings.Replace(text, "  \"🇯🇵 日本 02\",", "  \"🇯🇵 日本 01\",", 1)
+				return strings.Replace(text, "  \"node-02\",", "  \"node-01\",", 1)
 			},
 			want: "duplicate",
 		},
 	}
-	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.toml"))
+	original, err := os.ReadFile(filepath.Join("..", "..", "config", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}

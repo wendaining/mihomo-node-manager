@@ -50,7 +50,7 @@ US-Reality-device-1
 
 ## 策略真值
 
-配置默认值以 `config/config.toml` 为准：
+配置默认值以 `config/config.example.toml` 为准：
 
 - 每 60 秒探测，Google 204，超时 5 秒，并发 4，保留最近 10 次结果。
 - 延迟使用 alpha `0.35` 的 EWMA；首次成功即可参与选择。
@@ -91,7 +91,7 @@ go mod verify
 go vet ./...
 go test -race ./...
 make build
-./outputs/mihomo-node-manager --config config/config.toml --check-config
+./outputs/mihomo-node-manager --config config/config.example.toml --check-config
 ```
 
 接触真实服务器时，先做无副作用验证：

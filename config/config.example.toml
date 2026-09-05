@@ -2,13 +2,17 @@
 state_file = "/var/lib/mihomo-node-manager/state.json"
 
 # This is a strict allowlist. The service never selects any other Mihomo node.
+# The names must match your Mihomo proxy inventory verbatim - copy them from
+# `GET /providers/proxies` (or the `all` list of `GET /proxies/{group}`),
+# including emoji, spaces and casing. Names shown in subscription GUIs often
+# differ from the API names.
 allowed_nodes = [
-  "🇯🇵 日本 01",
-  "🇯🇵 日本 02",
-  "🇺🇸 美国 01",
-  "🇺🇸 美国 02",
-  "🇺🇸 美国 03",
-  "US-Reality-device-1",
+  "node-01",
+  "node-02",
+  "node-03",
+  "node-04",
+  "node-05",
+  "node-06",
 ]
 
 [mihomo]
@@ -64,12 +68,22 @@ timeout_seconds = 20
 max_tokens = 16
 prompt = "ping"
 # When the current node turns dirty, this node is tested and preferred first
-# before scanning the rest by latency. Must be one of allowed_nodes.
-safe_node = "US-Reality-device-1"
+# before scanning the rest by latency. Must be one of allowed_nodes; leave
+# empty to disable the preference.
+safe_node = ""
 # Close the group's existing connections after a switch or test so clients
 # (the CPA included) re-dial through the new node immediately. This also keeps
 # ping-pong results from being polluted by connections pinned to old nodes.
 close_conns_on_switch = true
+
+# Optional override for the "dirty" verdict. Omitted, the built-in rule marks a
+# node dirty on the Gemini location ban: HTTP 400 whose body contains
+# "user location is not supported" or "failed_precondition". Uncomment and
+# adapt it if your CPA fronts a different provider.
+#
+# [pingpong.dirty_match]
+# status = 400
+# body_contains = ["user location is not supported", "failed_precondition"]
 
 [api]
 # The program rejects non-loopback listen addresses.

@@ -13,7 +13,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # outside the repository and an upgrade is "git pull && make build && restart".
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 binary_source="$repo_dir/outputs/mihomo-node-manager"
-config_source="$repo_dir/config/config.toml"
+config_source="$repo_dir/config/config.example.toml"
 unit_source="$script_dir/mihomo-node-manager.service"
 env_example_source="$repo_dir/.env.example"
 

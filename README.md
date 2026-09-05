@@ -50,14 +50,14 @@ sudo systemctl restart mihomo-node-manager
 
 服务端的 `.env` 之所以放在 `/etc/mihomo-node-manager/`，是因为 systemd unit 把 `WorkingDirectory` 指向了该目录，配置默认值 `pingpong.env_file = ".env"` 就会解析到这里。也可以不改文件，直接在 unit 里用 `Environment=`/`EnvironmentFile=` 注入 `CPA_*` 变量（进程环境变量优先于 `.env` 文件）。
 
-`CPA_BASE_URL` 与 `CPA_MODEL` 都非空时探测才会启用；两者只填其一会在启动时直接报错。全部留空 = 功能关闭，行为与旧版本一致。`pingpong.*` 的其余参数（复测间隔、脏标记 TTL、超时、safe_node 等）在 `config/config.toml` 的 `[pingpong]` 段。
+`CPA_BASE_URL` 与 `CPA_MODEL` 都非空时探测才会启用；两者只填其一会在启动时直接报错。全部留空 = 功能关闭，行为与旧版本一致。`pingpong.*` 的其余参数（复测间隔、脏标记 TTL、超时、safe_node 等）在 `config/config.example.toml` 的 `[pingpong]` 段。
 
 ## 构建与检查
 
 ```sh
 make race vet build
-./outputs/mihomo-node-manager --config config/config.toml --check-config
-./outputs/mihomo-node-manager --config config/config.toml --once --dry-run
+./outputs/mihomo-node-manager --config config/config.example.toml --check-config
+./outputs/mihomo-node-manager --config config/config.example.toml --once --dry-run
 ```
 
 `--once --dry-run` 会连接 Mihomo 并探测节点，不会发出切换请求，也不会写状态文件。若已配置 CPA，它还会对**当前节点**发一次 ping-pong 请求（这是探测，不是切换；会给 CPA 带来一次极小的请求量），并对"需要先测试才能切换"的候选节点只输出计划。
