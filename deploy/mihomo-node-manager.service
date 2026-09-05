@@ -1,0 +1,40 @@
+[Unit]
+Description=Mihomo Allowed-Node Manager
+Documentation=https://wiki.metacubex.one/en/api/
+Wants=network-online.target mihomo.service
+After=network-online.target mihomo.service
+
+[Service]
+Type=simple
+User=mihomo-node-manager
+Group=mihomo-node-manager
+ExecStartPre=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml --check-config
+ExecStart=/usr/local/bin/mihomo-node-manager --config /etc/mihomo-node-manager/config.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+StateDirectory=mihomo-node-manager
+StateDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

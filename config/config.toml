@@ -1,0 +1,45 @@
+# Persistent manager state. systemd creates this directory for the service user.
+state_file = "/var/lib/mihomo-node-manager/state.json"
+
+# This is a strict allowlist. The service never selects any other Mihomo node.
+allowed_nodes = [
+  "🇯🇵 日本 01",
+  "🇯🇵 日本 02",
+  "🇺🇸 美国 01",
+  "🇺🇸 美国 02",
+  "🇺🇸 美国 03",
+  "US-Reality-device-1",
+]
+
+[mihomo]
+base_url = "http://127.0.0.1:9090"
+group = "PROXY"
+# Leave empty while the loopback Mihomo API has no secret. If a secret is added
+# later, place only the secret in a mode-0600 file and set its path here.
+secret_file = ""
+request_timeout_ms = 6000
+
+[probe]
+url = "https://www.gstatic.com/generate_204"
+expected_status = "204"
+timeout_ms = 5000
+interval_seconds = 60
+concurrency = 4
+history_size = 10
+
+[policy]
+ewma_alpha = 0.35
+failure_threshold = 2
+recovery_threshold = 2
+min_dwell_seconds = 600
+improvement_ratio = 0.20
+improvement_ms = 100
+better_rounds = 3
+manual_override_seconds = 1800
+
+[api]
+# The program rejects non-loopback listen addresses.
+listen = "127.0.0.1:9123"
+
+[logging]
+level = "info"

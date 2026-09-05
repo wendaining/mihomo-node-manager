@@ -1,0 +1,28 @@
+# Go build and test artifacts
+/bin/
+/dist/
+/build/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Generated delivery artifacts
+/outputs/
+/work/
+*.tar.gz
+
+# Runtime and local state
+*.log
+*.tmp
+*.token
+.env
+.env.*
+state.json
+
+# Editors and operating-system files
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
